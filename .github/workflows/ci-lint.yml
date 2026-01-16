@@ -1,14 +1,10 @@
 name: CI Linter pipeline
 on:
   push:
-    tags:
-      - v*
-    branches:
-      - master
-      - main
+    branches: [main, master]
   pull_request:
-permissions:
-  contents: read
+    branches: [main, master]
+  workflow_dispatch:
 
 env:
   GIT_COMMIT: ${{ github.sha }}
