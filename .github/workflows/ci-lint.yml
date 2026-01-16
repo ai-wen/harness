@@ -57,7 +57,7 @@ jobs:
       - name: Download web build artifacts
         uses: actions/download-artifact@v4
         with:
-          name: web-dist
+          name: web-build  #名称应保持一致
           path: web/dist/
           
       - name: Get Git commit info
