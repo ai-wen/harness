@@ -72,9 +72,7 @@ jobs:
           CC: x86_64-w64-mingw32-gcc
           LDFLAGS: "-extldflags '-static -Wl,--major-subsystem-version=6,--minor-subsystem-version=1'"
         run: |
-          mkdir -p ./dist ./release
-          
-          echo "Building for Windows 7 (Windows 6.1) compatibility..."
+          mkdir -p ./release
           
           CGO_ENABLED=1 \
           GOOS=windows \
@@ -82,16 +80,15 @@ jobs:
           CC=$CC \
           go build \
             -ldflags="$LDFLAGS" \
-            -tags="netgo osusergo" \
-            -o ./dist/gitness-windows-amd64.exe \
+            -o ./release/gitness-windows-amd64.exe \
             ./cmd/gitness
           
-          file ./dist/gitness-windows-amd64.exe
+          file ./release/gitness-windows-amd64.exe
           
       - name: Upload complete Windows 7 package
         uses: actions/upload-artifact@v4
         with:
           name: gitness-windows7-complete
-          path: ./dist/
+          path: ./release/
           retention-days: 7
           if-no-files-found: error
