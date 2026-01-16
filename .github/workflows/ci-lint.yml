@@ -9,8 +9,14 @@ on:
   pull_request:
 permissions:
   contents: read
-  # Optional: allow read access to pull request. Use with `only-new-issues` option.
-  # pull-requests: read
+
+env:
+  GIT_COMMIT: ${{ github.sha }}
+  GITNESS_VERSION_MAJOR: "0"
+  GITNESS_VERSION_MINOR: "1"
+  GITNESS_VERSION_PATCH: "0"
+  BUILD_VERSION: "v${{ env.GITNESS_VERSION_MAJOR }}.${{ env.GITNESS_VERSION_MINOR }}.${{ env.GITNESS_VERSION_PATCH }}"
+
 jobs:
   web:
     name: CI linter for js/ts
@@ -28,6 +34,7 @@ jobs:
           yarn install
           yarn check:all
           yarn build
+  
   gitness:
     name: CI linter for go
     runs-on: ubuntu-latest
@@ -43,24 +50,128 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v3
         with:
-          # Optional: version of golangci-lint to use in form of v1.2 or v1.2.3 or `latest` to use the latest version
           version: v1.64.5
-
-          # Optional: working directory, useful for monorepos
-          # working-directory: somedir
-
-          # Optional: golangci-lint command line arguments.
-          # args: --issues-exit-code=0
-
-          # Optional: show only new issues if it's a pull request. The default value is `false`.
-          # only-new-issues: true
-
-          # Optional: if set to true then the all caching functionality will be complete disabled,
-          #           takes precedence over all other caching options.
-          # skip-cache: true
-
-          # Optional: if set to true then the action don't cache or restore ~/go/pkg.
-          # skip-pkg-cache: true
-
-          # Optional: if set to true then the action don't cache or restore ~/.cache/go-build.
-          # skip-build-cache: true
+  
+  build-windows:
+    name: Build for Windows 7
+    runs-on: ubuntu-latest
+    needs: [gitness]  # 确保先通过代码检查
+    env:
+      TARGETOS: windows
+      TARGETARCH: amd64
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0  # 获取完整的 git 历史，用于获取提交信息
+      
+      - uses: actions/setup-go@v4
+        with:
+          go-version: '1.23'
+      
+      - name: Get Git commit info
+        id: git-info
+        run: |
+          echo "GIT_COMMIT_SHORT=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "GIT_COMMIT_FULL=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+          echo "GIT_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo 'v0.0.0')" >> $GITHUB_OUTPUT
+      
+      - name: Setup mingw-w64 for Windows cross-compilation
+        run: |
+          # 安装 mingw-w64 工具链用于 Windows 交叉编译
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64
+          # 检查 mingw 编译器是否安装成功
+          x86_64-w64-mingw32-gcc --version
+      
+      - name: Build Windows 7 compatible executable
+        env:
+          CC: x86_64-w64-mingw32-gcc
+          # 针对 Windows 7 的额外标志
+          # Windows 7 需要较旧的可执行文件格式，使用 -Wl,--major-subsystem-version=6,--minor-subsystem-version=1
+          # 这会将可执行文件标记为与 Windows 7 (6.1) 兼容
+          LDFLAGS: "-X github.com/harness/gitness/version.GitCommit=${{ steps.git-info.outputs.GIT_COMMIT_FULL }} \
+                    -X github.com/harness/gitness/version.major=${{ env.GITNESS_VERSION_MAJOR }} \
+                    -X github.com/harness/gitness/version.minor=${{ env.GITNESS_VERSION_MINOR }} \
+                    -X github.com/harness/gitness/version.patch=${{ env.GITNESS_VERSION_PATCH }} \
+                    -extldflags '-static -Wl,--major-subsystem-version=6,--minor-subsystem-version=1'"
+        run: |
+          # 创建输出目录
+          mkdir -p ./dist ./release
+          
+          # 构建 Windows 7 兼容的可执行文件
+          echo "Building for Windows 7 (Windows 6.1) compatibility..."
+          
+          # 使用 CGO_ENABLED=1 因为我们要链接 mingw 库
+          # 但使用 -static 标志进行静态链接，避免 Windows 7 上的 DLL 问题
+          CGO_ENABLED=1 \
+          GOOS=windows \
+          GOARCH=amd64 \
+          CC=$CC \
+          go build \
+            -ldflags="$LDFLAGS" \
+            -tags="netgo osusergo" \
+            -o ./dist/gitness-windows-amd64.exe \
+            ./cmd/gitness
+          
+          # 验证构建的可执行文件
+          file ./dist/gitness-windows-amd64.exe
+          
+          # 如果需要，也可以构建 32 位版本（Windows 7 32位）
+          # i686-w64-mingw32-gcc 用于 32 位编译
+          if [ -x "$(command -v i686-w64-mingw32-gcc)" ]; then
+            echo "Building 32-bit version for Windows 7..."
+            CC=i686-w64-mingw32-gcc \
+            GOARCH=386 \
+            CGO_ENABLED=1 \
+            go build \
+              -ldflags="$LDFLAGS" \
+              -tags="netgo osusergo" \
+              -o ./dist/gitness-windows-386.exe \
+              ./cmd/gitness
+          fi
+      
+      - name: Create Windows 7 release package
+        run: |
+          # 创建版本信息文件
+          cat > ./release/VERSION.txt << EOF
+          Application: Gitness
+          Version: ${{ env.BUILD_VERSION }}
+          Git Commit: ${{ steps.git-info.outputs.GIT_COMMIT_FULL }}
+          Build Date: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          Target: Windows 7 (compatible)
+          Architecture: amd64
+          
+          Notes:
+          - This executable is statically linked for Windows 7 compatibility
+          - Minimum Windows version: Windows 7 (6.1)
+          - Subsystem version set to 6.1 for Windows 7 compatibility
+          EOF
+          
+          # 复制可执行文件到 release 目录
+          cp ./dist/gitness-windows-amd64.exe ./release/
+          
+          # 如果构建了 32 位版本，也复制
+          if [ -f ./dist/gitness-windows-386.exe ]; then
+            cp ./dist/gitness-windows-386.exe ./release/
+          fi
+          
+          # 列出 release 目录内容
+          ls -la ./release/
+      
+      - name: Upload Windows 7 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitness-windows7
+          path: ./release/
+          retention-days: 30
+          if-no-files-found: error
+      
+      # 可选：自动创建 GitHub Release
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ./release/*
+          name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
