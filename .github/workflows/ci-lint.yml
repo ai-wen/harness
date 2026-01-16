@@ -30,36 +30,26 @@ jobs:
           yarn install
           yarn check:all
           yarn build
-  
-  gitness:
-    name: CI linter for go
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-go@v4
+      
+      - name: Upload web build artifacts
+        uses: actions/upload-artifact@v4
         with:
-          go-version: '1.23'
-      - name: get dependencies
-        run: |
-          mkdir -p ./web/dist
-          touch ./web/dist/empty.txt
-      - name: golangci-lint
-        uses: golangci/golangci-lint-action@v3
-        with:
-          version: v1.64.5
+          name: web-build
+          path: web/dist/
+          retention-days: 7
   
   build-windows:
     name: Build for Windows 7
     runs-on: ubuntu-latest
-    needs: [gitness]  # 确保先通过代码检查
+    needs: [web] 
     env:
       TARGETOS: windows
       TARGETARCH: amd64
     steps:
       - uses: actions/checkout@v3
         with:
-          fetch-depth: 0  # 获取完整的 git 历史，用于获取提交信息
-      
+          fetch-depth: 0
+  
       - uses: actions/setup-go@v4
         with:
           go-version: '1.23'
@@ -73,32 +63,19 @@ jobs:
       
       - name: Setup mingw-w64 for Windows cross-compilation
         run: |
-          # 安装 mingw-w64 工具链用于 Windows 交叉编译
           sudo apt-get update
           sudo apt-get install -y mingw-w64
-          # 检查 mingw 编译器是否安装成功
           x86_64-w64-mingw32-gcc --version
       
       - name: Build Windows 7 compatible executable
         env:
           CC: x86_64-w64-mingw32-gcc
-          # 针对 Windows 7 的额外标志
-          # Windows 7 需要较旧的可执行文件格式，使用 -Wl,--major-subsystem-version=6,--minor-subsystem-version=1
-          # 这会将可执行文件标记为与 Windows 7 (6.1) 兼容
-          LDFLAGS: "-X github.com/harness/gitness/version.GitCommit=${{ steps.git-info.outputs.GIT_COMMIT_FULL }} \
-                    -X github.com/harness/gitness/version.major=${{ env.GITNESS_VERSION_MAJOR }} \
-                    -X github.com/harness/gitness/version.minor=${{ env.GITNESS_VERSION_MINOR }} \
-                    -X github.com/harness/gitness/version.patch=${{ env.GITNESS_VERSION_PATCH }} \
-                    -extldflags '-static -Wl,--major-subsystem-version=6,--minor-subsystem-version=1'"
+          LDFLAGS: "-extldflags '-static -Wl,--major-subsystem-version=6,--minor-subsystem-version=1'"
         run: |
-          # 创建输出目录
           mkdir -p ./dist ./release
           
-          # 构建 Windows 7 兼容的可执行文件
           echo "Building for Windows 7 (Windows 6.1) compatibility..."
           
-          # 使用 CGO_ENABLED=1 因为我们要链接 mingw 库
-          # 但使用 -static 标志进行静态链接，避免 Windows 7 上的 DLL 问题
           CGO_ENABLED=1 \
           GOOS=windows \
           GOARCH=amd64 \
@@ -109,65 +86,35 @@ jobs:
             -o ./dist/gitness-windows-amd64.exe \
             ./cmd/gitness
           
-          # 验证构建的可执行文件
           file ./dist/gitness-windows-amd64.exe
-          
-          # 如果需要，也可以构建 32 位版本（Windows 7 32位）
-          # i686-w64-mingw32-gcc 用于 32 位编译
-          if [ -x "$(command -v i686-w64-mingw32-gcc)" ]; then
-            echo "Building 32-bit version for Windows 7..."
-            CC=i686-w64-mingw32-gcc \
-            GOARCH=386 \
-            CGO_ENABLED=1 \
-            go build \
-              -ldflags="$LDFLAGS" \
-              -tags="netgo osusergo" \
-              -o ./dist/gitness-windows-386.exe \
-              ./cmd/gitness
-          fi
       
-      - name: Create Windows 7 release package
+      - name: Download web build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: web-build
+          path: ./web/dist/
+      
+      - name: Create complete Windows 7 release package
         run: |
-          # 创建版本信息文件
-          cat > ./release/VERSION.txt << EOF
-          Application: Gitness
-          Version: ${{ env.BUILD_VERSION }}
-          Git Commit: ${{ steps.git-info.outputs.GIT_COMMIT_FULL }}
-          Build Date: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          Target: Windows 7 (compatible)
-          Architecture: amd64
           
-          Notes:
-          - This executable is statically linked for Windows 7 compatibility
-          - Minimum Windows version: Windows 7 (6.1)
-          - Subsystem version set to 6.1 for Windows 7 compatibility
-          EOF
-          
-          # 复制可执行文件到 release 目录
+          # 复制可执行文件
           cp ./dist/gitness-windows-amd64.exe ./release/
           
-          # 如果构建了 32 位版本，也复制
-          if [ -f ./dist/gitness-windows-386.exe ]; then
-            cp ./dist/gitness-windows-386.exe ./release/
+          # 复制 web 构建文件（如果存在）
+          if [ -d "./web/dist" ]; then
+            mkdir -p ./release/web
+            cp -r ./web/dist/* ./release/web/
           fi
           
           # 列出 release 目录内容
-          ls -la ./release/
+          echo "Release directory contents:"
+          find ./release -type f | sort
+          du -sh ./release
       
-      - name: Upload Windows 7 artifact
+      - name: Upload complete Windows 7 package
         uses: actions/upload-artifact@v4
         with:
-          name: gitness-windows7
+          name: gitness-windows7-complete
           path: ./release/
-          retention-days: 30
+          retention-days: 7
           if-no-files-found: error
-      
-      # 可选：自动创建 GitHub Release
-      - name: Create Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v1
-        with:
-          files: ./release/*
-          name: Release ${{ github.ref_name }}
-          draft: false
-          prerelease: false
